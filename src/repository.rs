@@ -305,7 +305,11 @@ impl PgRepository {
         let id = Uuid::new_v4();
         let json = serde_json::to_value(items)
             .map_err(|_| sqlx::Error::Protocol("invalid items".into()))?;
-        sqlx::query("INSERT INTO invoices(id,tenant_id,customer_id,amount,currency,status,due_date,line_items) VALUES($1,$2,$3,$4,$5,'open',$6,$7)").bind(id).bind(t).bind(cid).bind(amount).bind(currency).bind(due).bind(json).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO invoices(id,tenant_id,customer_id,amount,currency,status,due_date,line_items) VALUES($1,$2,$3,$4,$5,'draft',$6,$7)").bind(id).bind(t).bind(cid).bind(amount).bind(currency).bind(due).bind(json).execute(&mut *tx).await?;
+        let event_id = format!("invoice.created:{id}");
+        let payload = serde_json::to_vec(&serde_json::json!({"event_id":event_id,"event_type":"invoice.created","invoice_id":id,"customer_id":cid,"amount":amount,"currency":currency})).unwrap();
+        sqlx::query("INSERT INTO webhook_deliveries(id,registration_id,event_id,payload,event_type) SELECT $1,id,$2,$3,'invoice.created' FROM webhook_registrations WHERE tenant_id=$4 AND active=true ON CONFLICT DO NOTHING")
+            .bind(Uuid::new_v4()).bind(&event_id).bind(payload).bind(t).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(StoredInvoice {
             id,
@@ -422,6 +426,22 @@ impl PgRepository {
             .bind(t).bind(id).fetch_optional(&mut *tx).await?.ok_or(RepositoryError::NotFound)?;
         let (iid, cid, amount, currency, old, payment_id, due, items) = row;
         let items = serde_json::from_value(items).unwrap_or_default();
+        if payment_id.is_some() && old == "pending" {
+            tx.commit().await?;
+            return Ok(InvoiceClaim {
+                invoice: StoredInvoice {
+                    id: iid,
+                    customer_id: cid,
+                    amount,
+                    currency,
+                    status: old,
+                    payment_id,
+                    due_date: due,
+                    line_items: items,
+                },
+                claimed: false,
+            });
+        }
         if let Some(k) = key {
             if let Some((existing_id, existing_fp)) = sqlx::query_as::<_, (Uuid, String)>(
                 "SELECT id,request_fingerprint FROM payments WHERE tenant_id=$1 AND idempotency_key=$2 FOR UPDATE")
