@@ -43,7 +43,7 @@ fn seeded_invoice(s: &AppState) -> Uuid {
         customer_id,
         amount: 100,
         currency: "USD".into(),
-        status: "draft".into(),
+        status: "open".into(),
         payment_id: None,
         due_date: None,
         line_items: vec![LineItem {
@@ -129,7 +129,7 @@ async fn timeout_and_network_error_are_bounded_and_leave_valid_attempt() {
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let invoice = s.payments.invoice(id).unwrap();
-        assert!(matches!(invoice.status.as_str(), "failed" | "pending"));
+        assert_eq!(invoice.status, "open");
         let payment_id = invoice.payment_id.unwrap();
         assert_eq!(s.payments.attempts(payment_id).len(), 1);
     }

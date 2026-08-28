@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::time::Duration;
 use uuid::Uuid;
 pub async fn health() -> &'static str {
@@ -407,9 +407,12 @@ pub async fn pay_invoice(
                 line_items: invoice.line_items,
             }));
         }
-        let fp = hex::encode(Sha256::digest(
-            format!("{}:{}:{}", id, invoice.amount, req.payment_method_token).as_bytes(),
-        ));
+        let fp = payment_fingerprint(
+            id,
+            &req.payment_method_token,
+            invoice.amount,
+            &invoice.currency,
+        );
         let claim = repo
             .claim_invoice_payment(t, id, key(&h).as_deref(), &fp)
             .await

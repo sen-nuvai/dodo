@@ -1,4 +1,5 @@
 use crate::{
+    models::payment_fingerprint,
     models::{
         Customer, Invoice, Payment, PaymentAttempt, PaymentStatus, WebhookEvent,
         WebhookRegistrationResponse,
@@ -147,29 +148,17 @@ impl PaymentStore {
         if i.status == "paid" {
             return Ok(i);
         }
-        if i.status != "draft" && i.status != "open" {
+        if i.status != "open" {
             return Err(true);
         }
-        if token == "decline" {
-            i.status = "failed".into();
-            self.insert_invoice(i.clone());
-            return Ok(i);
-        }
+        let fp = payment_fingerprint(id, token, i.amount, &i.currency);
         let p = self
-            .create_locked(
-                psp,
-                i.amount,
-                i.currency.clone(),
-                key,
-                id.to_string(),
-                Some(token),
-            )
+            .create_locked(psp, i.amount, i.currency.clone(), key, fp, Some(token))
             .await?;
         i.payment_id = Some(p.id);
         i.status = match p.status {
             PaymentStatus::Succeeded => "paid",
-            PaymentStatus::Pending => "pending",
-            PaymentStatus::Failed => "failed",
+            PaymentStatus::Pending | PaymentStatus::Failed => "open",
         }
         .into();
         self.insert_invoice(i.clone());

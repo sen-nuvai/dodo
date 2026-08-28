@@ -478,7 +478,7 @@ impl PgRepository {
             .bind(payment_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE invoices SET status='pending', payment_id=$1, payment_claimed_at=now() WHERE tenant_id=$2 AND id=$3")
+        sqlx::query("UPDATE invoices SET status='open', payment_id=$1, payment_claimed_at=now() WHERE tenant_id=$2 AND id=$3")
             .bind(payment_id).bind(t).bind(id).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(InvoiceClaim {
