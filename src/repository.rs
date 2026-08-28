@@ -556,16 +556,7 @@ impl PgRepository {
         .await?;
         let registration_id = registrations
             .into_iter()
-<<<<<<< HEAD
-            .find_map(|(id, secret)| {
-                let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
-                mac.update(raw);
-                let provided = hex::decode(signature).ok()?;
-                mac.verify_slice(&provided).ok().map(|_| id)
-            })
-=======
             .find_map(|(id, secret)| verify_webhook(&secret, signature, raw).then_some(id))
->>>>>>> 36e8a96 (Harden webhook outbox and signatures)
             .ok_or_else(|| sqlx::Error::Protocol("invalid webhook signature".into()))?;
         let _: serde_json::Value = serde_json::from_slice(raw)
             .map_err(|_| sqlx::Error::Protocol("invalid webhook payload".into()))?;
@@ -605,16 +596,9 @@ pub async fn run_delivery_worker(repo: PgRepository) {
         .build()
         .expect("client");
     loop {
-<<<<<<< HEAD
-        let rows = sqlx::query_as::<_,(Uuid,String,String,Vec<u8>)>("UPDATE webhook_deliveries SET attempts=attempts+1,next_attempt_at=now()+least((2^LEAST(attempts,8)) * interval '1 second', interval '1 hour') WHERE id IN (SELECT id FROM webhook_deliveries WHERE delivered_at IS NULL AND exhausted_at IS NULL AND attempts < max_attempts AND next_attempt_at<=now() ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 20) RETURNING id,(SELECT url FROM webhook_registrations r WHERE r.id=registration_id),(SELECT secret FROM webhook_registrations r WHERE r.id=registration_id),payload").fetch_all(&repo.pool).await.unwrap_or_default();
-        for (id, url, secret, payload) in rows {
-            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac");
-            mac.update(&payload);
-=======
         let rows = sqlx::query_as::<_,(Uuid,String,String,Vec<u8>,i32,i64)>("WITH claimed AS (SELECT id FROM webhook_deliveries WHERE delivered_at IS NULL AND exhausted_at IS NULL AND attempts < 5 AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 20) UPDATE webhook_deliveries d SET attempts=d.attempts+1, lease_until=now()+interval '30 seconds' FROM claimed c WHERE d.id=c.id RETURNING d.id,(SELECT url FROM webhook_registrations r WHERE r.id=d.registration_id),(SELECT secret FROM webhook_registrations r WHERE r.id=d.registration_id),d.payload,d.attempts,extract(epoch from now())::bigint").fetch_all(&repo.pool).await.unwrap_or_default();
-        for (id, url, secret, payload, attempt, timestamp) in rows {
+        for (id, url, secret, payload, _attempt, timestamp) in rows {
             let sig = signed_webhook(&secret, timestamp, &payload);
->>>>>>> 36e8a96 (Harden webhook outbox and signatures)
             let result = client
                 .post(url)
                 .header("x-webhook-signature", sig)
@@ -630,22 +614,14 @@ pub async fn run_delivery_worker(repo: PgRepository) {
                             .await;
                 }
                 Ok(r) => {
-<<<<<<< HEAD
-                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, exhausted_at=CASE WHEN attempts >= max_attempts THEN now() ELSE exhausted_at END WHERE id=$1")
-=======
-                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, lease_until=NULL, exhausted_at=CASE WHEN attempts >= 5 THEN now() ELSE exhausted_at END, next_attempt_at=now()+CASE attempts WHEN 1 THEN interval '1 second' WHEN 2 THEN interval '2 seconds' WHEN 3 THEN interval '4 seconds' ELSE interval '8 seconds' END WHERE id=$1")
->>>>>>> 36e8a96 (Harden webhook outbox and signatures)
+                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, lease_until=NULL, exhausted_at=CASE WHEN attempts >= 5 THEN now() ELSE exhausted_at END, next_attempt_at=now()+CASE attempts WHEN 1 THEN interval '5 seconds' WHEN 2 THEN interval '30 seconds' WHEN 3 THEN interval '5 minutes' ELSE interval '30 minutes' END WHERE id=$1")
                         .bind(id)
                         .bind(format!("http {}", r.status()))
                         .execute(&repo.pool)
                         .await;
                 }
                 Err(e) => {
-<<<<<<< HEAD
-                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, exhausted_at=CASE WHEN attempts >= max_attempts THEN now() ELSE exhausted_at END WHERE id=$1")
-=======
-                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, lease_until=NULL, exhausted_at=CASE WHEN attempts >= 5 THEN now() ELSE exhausted_at END, next_attempt_at=now()+CASE attempts WHEN 1 THEN interval '1 second' WHEN 2 THEN interval '2 seconds' WHEN 3 THEN interval '4 seconds' ELSE interval '8 seconds' END WHERE id=$1")
->>>>>>> 36e8a96 (Harden webhook outbox and signatures)
+                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, lease_until=NULL, exhausted_at=CASE WHEN attempts >= 5 THEN now() ELSE exhausted_at END, next_attempt_at=now()+CASE attempts WHEN 1 THEN interval '5 seconds' WHEN 2 THEN interval '30 seconds' WHEN 3 THEN interval '5 minutes' ELSE interval '30 minutes' END WHERE id=$1")
                         .bind(id)
                         .bind(e.to_string())
                         .execute(&repo.pool)
