@@ -83,6 +83,10 @@ paths:
       parameters: [{in: header, name: Idempotency-Key, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {type: object, required: [payment_method_token], properties: {payment_method_token: {type: string}}}}}}
       responses: {'200': {description: Invoice, content: {application/json: {schema: {$ref: '#/components/schemas/Invoice'}}}}, '404': {description: Not found}, '409': {description: Conflict}}
+  /invoices/{id}/finalize:
+    post:
+      summary: Finalize a draft invoice
+      responses: {'200': {description: Open invoice, content: {application/json: {schema: {$ref: '#/components/schemas/Invoice'}}}}, '404': {description: Not found}, '409': {description: Invoice is not draft}}
   /webhooks/{registration_id}:
     post:
       summary: Apply an event for a specific tenant webhook registration
@@ -107,7 +111,7 @@ components:
     UpdateCustomer: {type: object, properties: {email: {type: string}, name: {type: string}}}
     Customer: {type: object, required: [id, email, name], properties: {id: {type: string, format: uuid}, email: {type: string}, name: {type: string}}}
     CreateInvoice: {type: object, required: [customer_id, currency, line_items], properties: {customer_id: {type: string, format: uuid}, currency: {type: string}, line_items: {type: array, items: {$ref: '#/components/schemas/LineItem'}}, due_date: {type: string, format: date, nullable: true}}}
-    Invoice: {type: object, required: [id, customer_id, amount, currency, status], properties: {id: {type: string, format: uuid}, customer_id: {type: string, format: uuid}, amount: {type: integer}, currency: {type: string}, status: {type: string, enum: [draft, paid, failed, pending]}, payment_id: {type: string, format: uuid, nullable: true}}}
+    Invoice: {type: object, required: [id, customer_id, amount, currency, status], properties: {id: {type: string, format: uuid}, customer_id: {type: string, format: uuid}, amount: {type: integer}, currency: {type: string}, status: {type: string, enum: [draft, open, paid, void, uncollectible]}, payment_id: {type: string, format: uuid, nullable: true}, due_date: {type: string, format: date, nullable: true}, line_items: {type: array, items: {$ref: '#/components/schemas/LineItem'}}}}
 
     LineItem:
       type: object

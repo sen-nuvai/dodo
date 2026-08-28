@@ -547,8 +547,6 @@ async fn webhook_inner(
             .await
             .map_err(|_| AppError::Unauthorized)?;
     }
-    let e: WebhookEvent =
-        serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("invalid event".into()))?;
     if let Some(repo) = &s.repository {
         let e: WebhookEvent = serde_json::from_slice(&body)
             .map_err(|_| AppError::BadRequest("invalid event".into()))?;

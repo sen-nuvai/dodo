@@ -52,7 +52,12 @@ impl InvoiceStatus {
 pub fn payment_fingerprint(invoice_id: Uuid, token: &str, amount: i64, currency: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"dodo-payment-v1\0");
-    for part in [invoice_id.to_string(), token.to_owned(), amount.to_string(), currency.to_uppercase()] {
+    for part in [
+        invoice_id.to_string(),
+        token.to_owned(),
+        amount.to_string(),
+        currency.to_uppercase(),
+    ] {
         h.update((part.len() as u64).to_be_bytes());
         h.update(part.as_bytes());
     }
