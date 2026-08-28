@@ -1,5 +1,38 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InvoiceStatus {
+    Draft,
+    Open,
+    Paid,
+    Void,
+    Uncollectible,
+}
+impl InvoiceStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Open => "open",
+            Self::Paid => "paid",
+            Self::Void => "void",
+            Self::Uncollectible => "uncollectible",
+        }
+    }
+}
+
+/// Versioned, length-delimited request fingerprint. The token is never persisted.
+pub fn payment_fingerprint(invoice_id: Uuid, token: &str, amount: i64, currency: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(b"dodo-payment-v1\0");
+    for part in [invoice_id.to_string(), token.to_owned(), amount.to_string(), currency.to_uppercase()] {
+        h.update((part.len() as u64).to_be_bytes());
+        h.update(part.as_bytes());
+    }
+    hex::encode(h.finalize())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
