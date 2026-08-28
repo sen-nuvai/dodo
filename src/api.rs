@@ -538,6 +538,18 @@ async fn webhook_inner(
     registration_id: Option<Uuid>,
 ) -> Result<StatusCode, AppError> {
     if let Some(repo) = &s.repository {
+        let t = tenant(&s, &h).await?.unwrap();
+        let sig = h
+            .get("x-webhook-signature")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        repo.verify_webhook_signature(t, registration_id, sig, &body)
+            .await
+            .map_err(|_| AppError::Unauthorized)?;
+    }
+    let e: WebhookEvent =
+        serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("invalid event".into()))?;
+    if let Some(repo) = &s.repository {
         let e: WebhookEvent = serde_json::from_slice(&body)
             .map_err(|_| AppError::BadRequest("invalid event".into()))?;
         let t = tenant(&s, &h).await?.unwrap();

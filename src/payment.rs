@@ -7,7 +7,11 @@ use crate::{
 };
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::{collections::HashMap, sync::RwLock, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::RwLock,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
@@ -281,10 +285,19 @@ impl PaymentStore {
             .build()
             .expect("valid webhook client");
         for t in targets {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
             let mut mac = HmacSha256::new_from_slice(t.secret.as_bytes()).unwrap();
+            mac.update(timestamp.to_string().as_bytes());
+            mac.update(b".");
             mac.update(&body);
-            let sig = hex::encode(mac.finalize().into_bytes());
-            for n in 0..3 {
+            let sig = format!(
+                "t={timestamp},v1={}",
+                hex::encode(mac.finalize().into_bytes())
+            );
+            for n in 0..5 {
                 let result = client
                     .post(&t.url)
                     .header("x-webhook-signature", &sig)

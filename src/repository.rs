@@ -2,9 +2,50 @@ use crate::models::LineItem;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
+
+fn signed_webhook(secret: &str, timestamp: i64, payload: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("valid hmac key");
+    mac.update(timestamp.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(payload);
+    format!(
+        "t={timestamp},v1={}",
+        hex::encode(mac.finalize().into_bytes())
+    )
+}
+
+fn verify_webhook(secret: &str, header: &str, payload: &[u8]) -> bool {
+    let mut timestamp = None;
+    let mut signature = None;
+    for part in header.split(',') {
+        let Some((key, value)) = part.trim().split_once('=') else {
+            continue;
+        };
+        match key {
+            "t" => timestamp = value.parse::<i64>().ok(),
+            "v1" => signature = hex::decode(value).ok(),
+            _ => {}
+        }
+    }
+    let (Some(ts), Some(sig)) = (timestamp, signature) else {
+        return false;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    if (now - ts).abs() > 300 {
+        return false;
+    }
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("valid hmac key");
+    mac.update(ts.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(payload);
+    mac.verify_slice(&sig).is_ok()
+}
 
 #[derive(Clone)]
 pub struct PgRepository {
@@ -472,6 +513,27 @@ impl PgRepository {
             secret,
         })
     }
+    pub async fn verify_webhook_signature(
+        &self,
+        t: Uuid,
+        registration_id: Option<Uuid>,
+        signature: &str,
+        raw: &[u8],
+    ) -> Result<(), RepositoryError> {
+        let rows = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT id,secret FROM webhook_registrations WHERE tenant_id=$1 AND active=true AND ($2::uuid IS NULL OR id=$2)",
+        )
+        .bind(t).bind(registration_id).fetch_all(&self.pool).await?;
+        if rows
+            .into_iter()
+            .any(|(_, secret)| verify_webhook(&secret, signature, raw))
+        {
+            Ok(())
+        } else {
+            Err(RepositoryError::NotFound)
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn apply_webhook(
         &self,
@@ -494,12 +556,16 @@ impl PgRepository {
         .await?;
         let registration_id = registrations
             .into_iter()
+<<<<<<< HEAD
             .find_map(|(id, secret)| {
                 let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
                 mac.update(raw);
                 let provided = hex::decode(signature).ok()?;
                 mac.verify_slice(&provided).ok().map(|_| id)
             })
+=======
+            .find_map(|(id, secret)| verify_webhook(&secret, signature, raw).then_some(id))
+>>>>>>> 36e8a96 (Harden webhook outbox and signatures)
             .ok_or_else(|| sqlx::Error::Protocol("invalid webhook signature".into()))?;
         let _: serde_json::Value = serde_json::from_slice(raw)
             .map_err(|_| sqlx::Error::Protocol("invalid webhook payload".into()))?;
@@ -539,36 +605,47 @@ pub async fn run_delivery_worker(repo: PgRepository) {
         .build()
         .expect("client");
     loop {
+<<<<<<< HEAD
         let rows = sqlx::query_as::<_,(Uuid,String,String,Vec<u8>)>("UPDATE webhook_deliveries SET attempts=attempts+1,next_attempt_at=now()+least((2^LEAST(attempts,8)) * interval '1 second', interval '1 hour') WHERE id IN (SELECT id FROM webhook_deliveries WHERE delivered_at IS NULL AND exhausted_at IS NULL AND attempts < max_attempts AND next_attempt_at<=now() ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 20) RETURNING id,(SELECT url FROM webhook_registrations r WHERE r.id=registration_id),(SELECT secret FROM webhook_registrations r WHERE r.id=registration_id),payload").fetch_all(&repo.pool).await.unwrap_or_default();
         for (id, url, secret, payload) in rows {
             let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac");
             mac.update(&payload);
+=======
+        let rows = sqlx::query_as::<_,(Uuid,String,String,Vec<u8>,i32,i64)>("WITH claimed AS (SELECT id FROM webhook_deliveries WHERE delivered_at IS NULL AND exhausted_at IS NULL AND attempts < 5 AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 20) UPDATE webhook_deliveries d SET attempts=d.attempts+1, lease_until=now()+interval '30 seconds' FROM claimed c WHERE d.id=c.id RETURNING d.id,(SELECT url FROM webhook_registrations r WHERE r.id=d.registration_id),(SELECT secret FROM webhook_registrations r WHERE r.id=d.registration_id),d.payload,d.attempts,extract(epoch from now())::bigint").fetch_all(&repo.pool).await.unwrap_or_default();
+        for (id, url, secret, payload, attempt, timestamp) in rows {
+            let sig = signed_webhook(&secret, timestamp, &payload);
+>>>>>>> 36e8a96 (Harden webhook outbox and signatures)
             let result = client
                 .post(url)
-                .header(
-                    "x-webhook-signature",
-                    hex::encode(mac.finalize().into_bytes()),
-                )
+                .header("x-webhook-signature", sig)
                 .body(payload)
                 .send()
                 .await;
             match result {
                 Ok(r) if r.status().is_success() => {
                     let _ =
-                        sqlx::query("UPDATE webhook_deliveries SET delivered_at=now() WHERE id=$1")
+                        sqlx::query("UPDATE webhook_deliveries SET delivered_at=now(), lease_until=NULL WHERE id=$1")
                             .bind(id)
                             .execute(&repo.pool)
                             .await;
                 }
                 Ok(r) => {
+<<<<<<< HEAD
                     let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, exhausted_at=CASE WHEN attempts >= max_attempts THEN now() ELSE exhausted_at END WHERE id=$1")
+=======
+                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, lease_until=NULL, exhausted_at=CASE WHEN attempts >= 5 THEN now() ELSE exhausted_at END, next_attempt_at=now()+CASE attempts WHEN 1 THEN interval '1 second' WHEN 2 THEN interval '2 seconds' WHEN 3 THEN interval '4 seconds' ELSE interval '8 seconds' END WHERE id=$1")
+>>>>>>> 36e8a96 (Harden webhook outbox and signatures)
                         .bind(id)
                         .bind(format!("http {}", r.status()))
                         .execute(&repo.pool)
                         .await;
                 }
                 Err(e) => {
+<<<<<<< HEAD
                     let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, exhausted_at=CASE WHEN attempts >= max_attempts THEN now() ELSE exhausted_at END WHERE id=$1")
+=======
+                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, lease_until=NULL, exhausted_at=CASE WHEN attempts >= 5 THEN now() ELSE exhausted_at END, next_attempt_at=now()+CASE attempts WHEN 1 THEN interval '1 second' WHEN 2 THEN interval '2 seconds' WHEN 3 THEN interval '4 seconds' ELSE interval '8 seconds' END WHERE id=$1")
+>>>>>>> 36e8a96 (Harden webhook outbox and signatures)
                         .bind(id)
                         .bind(e.to_string())
                         .execute(&repo.pool)
