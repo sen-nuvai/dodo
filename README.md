@@ -1,37 +1,58 @@
-# dodo
+# Dodo Payments
 
-A Rust/Axum payment API with tenant-scoped Postgres persistence, idempotent payment creation, deterministic mock PSP outcomes, invoices, attempts, and signed webhooks.
+A small Rust/Axum payment API with tenant-scoped PostgreSQL persistence, invoice payments, payment attempts, a mock PSP, idempotency, and signed asynchronous webhooks.
+
+## Architecture
+
+PostgreSQL is the durable coordination boundary when `DATABASE_URL` is set. Invoice payment uses a short transaction to lock the tenant-scoped invoice and create a pending payment claim before any PSP call. The claim commits, the PSP is called with a two-second deadline, and a second short transaction finalizes the payment and invoice. The in-memory store remains a development fallback only.
 
 ## Routes
 
-- `GET /health` returns `ok` without authentication.
-- `POST /customers`, `GET /customers`, `GET|PUT /customers/{id}` manage tenant customers.
-- `POST /invoices`, `GET /invoices` (optional `status` and `customer_id` filters), and `GET /invoices/{id}` manage invoices.
-- `POST /invoices/{id}/finalize` transitions an invoice from `draft` to `open`.
-- `POST /invoices/{id}/pay` pays an `open` invoice and creates its payment/attempt transactionally in Postgres.
-- `POST /payments` and `GET /payments/{id}` create and retrieve payments; `GET /payments/{id}/attempts` lists attempts.
-- `POST /webhooks` registers an outbound target and returns its signing secret. `POST /webhooks/mock` accepts a provider event, while `POST /webhooks/{registration_id}` selects a registration explicitly.
+- `GET /health`
+- Customer CRUD: `/customers`
+- Invoice create/list/get: `/invoices`, `/invoices/{id}`
+- `POST /invoices/{id}/finalize` (`draft → open`)
+- `POST /invoices/{id}/pay` (only `open` invoices)
+- Payment create/get/attempts: `/payments`, `/payments/{id}`, `/payments/{id}/attempts`
+- Webhook registration and inbound mock events: `/webhooks`, `/webhooks/mock`, `/webhooks/{registration_id}`
 
-All non-health routes use `X-API-Key` in Postgres mode. If `API_TOKEN` is set, every route also requires either `Authorization: Bearer $API_TOKEN` or the same value in `X-API-Key`. Tenant keys use `prefix_secret` format; only the prefix and SHA-256 hash are stored.
+PostgreSQL routes require `X-API-Key` in `prefix_secret` format. When `API_TOKEN` is configured, bearer middleware also applies.
 
-## Payment and invoice statuses
+## State and idempotency
 
-Payments and attempts are `pending`, `succeeded`, or `failed`. Invoices are `draft`, `open`, `paid`, `void`, or `uncollectible`; finalize before paying. A declined payment leaves the invoice `open`; timeout/network results remain a pending attempt with unknown PSP outcome. The mock tokens are `tok_success`, `tok_card_declined`, `tok_insufficient_funds`, `tok_network_error`, and `tok_timeout`; the timeout has a bounded two-second client deadline. Idempotency keys are tenant-scoped and fingerprints include invoice, token, amount, and currency; matching retries replay without another charge and mismatches return `409`.
+Invoice states are `draft`, `open`, `paid`, `void`, and `uncollectible`. Payment attempts are `pending`, `succeeded`, or `failed`. Failed and unknown PSP outcomes leave the invoice `open`; a timeout leaves the payment attempt `pending` because the provider may have charged.
 
-Outbound `invoice.created`, `invoice.paid`, and `invoice.payment_failed` events are queued transactionally. Delivery is asynchronous and signed with HMAC-SHA256 over `timestamp.payload` using `X-Webhook-Timestamp` and `X-Webhook-Signature: t=...,v1=...`. Deliveries retry at most five times: immediate, +5s, +30s, +5m, +30m, then become exhausted.
+`Idempotency-Key` is tenant-scoped. Its fingerprint is a versioned SHA-256 over invoice ID, payment token, amount, and uppercase currency. A matching key/fingerprint replays the durable operation without a PSP call; a changed fingerprint returns `409 Conflict`. PostgreSQL row locking prevents two local claims for one invoice. Exactly-once external charging is not claimed because the mock PSP has no reconciliation API.
 
-## Run
+## Webhooks
+
+`invoice.created`, `invoice.paid`, and `invoice.payment_failed` are queued in the same PostgreSQL transaction as the corresponding state change. Delivery is asynchronous through PostgreSQL rows and `FOR UPDATE SKIP LOCKED`. Payload bytes are signed as `timestamp + "." + raw_payload` with HMAC-SHA256. Consumers should reject timestamps older than five minutes. Deliveries retry at most five times: immediate, +5 seconds, +30 seconds, +5 minutes, +30 minutes, then become exhausted.
+
+## Run and test
+
+Requirements: Rust, Docker Compose, and PostgreSQL for integration coverage.
 
 ```bash
 cargo fmt --check
-cargo check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
-# Optional: runs Postgres-gated repository coverage; skips when DATABASE_URL is unset.
 DATABASE_URL=postgres://dodo:dodo@localhost:5432/dodo cargo test --test postgres
-cargo run
+BOOTSTRAP_API_KEY=demo_secret docker compose up --build
 ```
 
-Docker Compose starts Postgres, the API, and the mock PSP. Set `BOOTSTRAP_API_KEY=prefix_secret` before `docker compose up -d --build`, then send it as `X-API-Key`. The server listens on port 3000 (`PORT` overrides it). Do not use `docker compose down -v` for routine cleanup.
+Override `APP_PORT` or `PSP_PORT` when host ports are occupied. Compose migrations run on a fresh database volume; existing volumes retain SQLx migration history and should not be deleted without review.
 
-Amounts are integer minor units (`unit_amount_cents` for line-item prices). This is not PCI compliant, horizontally scalable, or suitable for real funds without production persistence, provider, security, reconciliation, and operations review.
+Example payment sequence:
+
+```bash
+# Create invoice, then finalize it
+curl -X POST http://localhost:3000/invoices/{id}/finalize
+curl -X POST http://localhost:3000/invoices/{id}/pay \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: invoice-001' \
+  -d '{"payment_method_token":"tok_success"}'
+```
+
+The mock PSP supports `tok_success`, `tok_insufficient_funds`, `tok_card_declined`, `tok_timeout`, and `tok_network_error`. A demo video is intentionally a submission artifact: **[demo video placeholder]**.
+
+This take-home is not PCI compliant and is not suitable for real funds without provider idempotency/reconciliation, secret management, observability, and operational controls.
