@@ -475,8 +475,8 @@ impl PgRepository {
             .find_map(|(id, secret)| {
                 let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
                 mac.update(raw);
-                let expected = hex::encode(mac.finalize().into_bytes());
-                (expected == signature).then_some(id)
+                let provided = hex::decode(signature).ok()?;
+                mac.verify_slice(&provided).ok().map(|_| id)
             })
             .ok_or_else(|| sqlx::Error::Protocol("invalid webhook signature".into()))?;
         let _: serde_json::Value = serde_json::from_slice(raw)
@@ -491,8 +491,24 @@ impl PgRepository {
             .bind(Uuid::new_v4()).bind(registration_id).bind(event_id).bind(raw).execute(&mut *tx).await?;
         let changed = sqlx::query("UPDATE payments SET status=$1,provider_id=COALESCE($2,provider_id),updated_at=now() WHERE id=$3 AND tenant_id=$4 AND status='pending'")
             .bind(status).bind(provider).bind(pid).bind(t).execute(&mut *tx).await?;
+        if changed.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO payment_attempts(id,payment_id,status,provider_id) VALUES($1,$2,$3,$4)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(pid)
+        .bind(status)
+        .bind(provider)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE invoices SET status=CASE WHEN $1='succeeded' THEN 'paid' WHEN $1='failed' THEN 'failed' ELSE 'pending' END,updated_at=now() WHERE tenant_id=$2 AND payment_id=$3")
+            .bind(status).bind(t).bind(pid)
+            .execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(changed.rows_affected() == 1)
+        Ok(true)
     }
 }
 pub async fn run_delivery_worker(repo: PgRepository) {
@@ -501,7 +517,7 @@ pub async fn run_delivery_worker(repo: PgRepository) {
         .build()
         .expect("client");
     loop {
-        let rows = sqlx::query_as::<_,(Uuid,String,String,Vec<u8>)>("UPDATE webhook_deliveries SET attempts=attempts+1,next_attempt_at=now()+least((2^LEAST(attempts,8)) * interval '1 second', interval '1 hour') WHERE id IN (SELECT id FROM webhook_deliveries WHERE delivered_at IS NULL AND attempts < max_attempts AND next_attempt_at<=now() ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 20) RETURNING id,(SELECT url FROM webhook_registrations r WHERE r.id=registration_id),(SELECT secret FROM webhook_registrations r WHERE r.id=registration_id),payload").fetch_all(&repo.pool).await.unwrap_or_default();
+        let rows = sqlx::query_as::<_,(Uuid,String,String,Vec<u8>)>("UPDATE webhook_deliveries SET attempts=attempts+1,next_attempt_at=now()+least((2^LEAST(attempts,8)) * interval '1 second', interval '1 hour') WHERE id IN (SELECT id FROM webhook_deliveries WHERE delivered_at IS NULL AND exhausted_at IS NULL AND attempts < max_attempts AND next_attempt_at<=now() ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 20) RETURNING id,(SELECT url FROM webhook_registrations r WHERE r.id=registration_id),(SELECT secret FROM webhook_registrations r WHERE r.id=registration_id),payload").fetch_all(&repo.pool).await.unwrap_or_default();
         for (id, url, secret, payload) in rows {
             let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac");
             mac.update(&payload);
@@ -523,14 +539,14 @@ pub async fn run_delivery_worker(repo: PgRepository) {
                             .await;
                 }
                 Ok(r) => {
-                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2 WHERE id=$1")
+                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, exhausted_at=CASE WHEN attempts >= max_attempts THEN now() ELSE exhausted_at END WHERE id=$1")
                         .bind(id)
                         .bind(format!("http {}", r.status()))
                         .execute(&repo.pool)
                         .await;
                 }
                 Err(e) => {
-                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2 WHERE id=$1")
+                    let _ = sqlx::query("UPDATE webhook_deliveries SET last_error=$2, exhausted_at=CASE WHEN attempts >= max_attempts THEN now() ELSE exhausted_at END WHERE id=$1")
                         .bind(id)
                         .bind(e.to_string())
                         .execute(&repo.pool)

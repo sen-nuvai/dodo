@@ -504,9 +504,9 @@ async fn webhook_inner(
     body: Bytes,
     registration_id: Option<Uuid>,
 ) -> Result<StatusCode, AppError> {
-    let e: WebhookEvent =
-        serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("invalid event".into()))?;
     if let Some(repo) = &s.repository {
+        let e: WebhookEvent = serde_json::from_slice(&body)
+            .map_err(|_| AppError::BadRequest("invalid event".into()))?;
         let t = tenant(&s, &h).await?.unwrap();
         let sig = h
             .get("x-webhook-signature")
@@ -531,6 +531,8 @@ async fn webhook_inner(
             Err(AppError::NotFound)
         };
     }
+    let e: WebhookEvent =
+        serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("invalid event".into()))?;
     let target = s.payments.webhooks.read().unwrap().values().next().cloned();
     if let Some(t) = target {
         let sig = h
