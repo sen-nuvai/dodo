@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 use uuid::Uuid;
 pub async fn health() -> &'static str {
@@ -407,6 +407,30 @@ pub async fn pay_invoice(
                 line_items: invoice.line_items,
             }));
         }
+        let fp = hex::encode(Sha256::digest(
+            format!("{}:{}:{}", id, invoice.amount, req.payment_method_token).as_bytes(),
+        ));
+        let claim = repo
+            .claim_invoice_payment(t, id, key(&h).as_deref(), &fp)
+            .await
+            .map_err(|e| match e {
+                crate::repository::RepositoryError::NotFound => AppError::NotFound,
+                crate::repository::RepositoryError::IdempotencyConflict => AppError::Conflict,
+                _ => AppError::Internal,
+            })?;
+        if !claim.claimed {
+            return Ok(Json(Invoice {
+                id: claim.invoice.id,
+                customer_id: claim.invoice.customer_id,
+                amount: claim.invoice.amount,
+                currency: claim.invoice.currency,
+                status: claim.invoice.status,
+                payment_id: claim.invoice.payment_id,
+                due_date: claim.invoice.due_date,
+                line_items: claim.invoice.line_items,
+            }));
+        }
+        let invoice = claim.invoice;
         let charge = tokio::time::timeout(
             Duration::from_secs(2),
             s.psp.charge(
@@ -422,11 +446,10 @@ pub async fn pay_invoice(
             Ok(Err(e)) => ("failed", None, Some(e.code().to_owned())),
         };
         let x = repo
-            .pay_invoice(
+            .finalize_invoice_payment(
                 t,
                 id,
-                key(&h).as_deref(),
-                &id.to_string(),
+                invoice.payment_id.unwrap(),
                 status,
                 provider.as_deref(),
                 error.as_deref(),
