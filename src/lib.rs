@@ -37,6 +37,7 @@ pub fn app(state: AppState) -> Router {
             get(api::list_invoices).post(api::create_invoice),
         )
         .route("/invoices/:id", get(api::get_invoice))
+        .route("/invoices/:id/finalize", post(api::finalize_invoice))
         .route("/invoices/:id/pay", post(api::pay_invoice))
         .route("/payments/:id/attempts", get(api::get_attempts))
         .route("/webhooks", post(api::register_webhook))
