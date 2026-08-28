@@ -305,7 +305,7 @@ impl PgRepository {
         let id = Uuid::new_v4();
         let json = serde_json::to_value(items)
             .map_err(|_| sqlx::Error::Protocol("invalid items".into()))?;
-        sqlx::query("INSERT INTO invoices(id,tenant_id,customer_id,amount,currency,status,due_date,line_items) VALUES($1,$2,$3,$4,$5,'draft',$6,$7)").bind(id).bind(t).bind(cid).bind(amount).bind(currency).bind(due).bind(json).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO invoices(id,tenant_id,customer_id,amount,currency,status,due_date,line_items) VALUES($1,$2,$3,$4,$5,'open',$6,$7)").bind(id).bind(t).bind(cid).bind(amount).bind(currency).bind(due).bind(json).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(StoredInvoice {
             id,
@@ -422,7 +422,19 @@ impl PgRepository {
             .bind(t).bind(id).fetch_optional(&mut *tx).await?.ok_or(RepositoryError::NotFound)?;
         let (iid, cid, amount, currency, old, payment_id, due, items) = row;
         let items = serde_json::from_value(items).unwrap_or_default();
-        if old == "paid" || old == "failed" || old == "pending" {
+        if let Some(k) = key {
+            if let Some((existing_id, existing_fp)) = sqlx::query_as::<_, (Uuid, String)>(
+                "SELECT id,request_fingerprint FROM payments WHERE tenant_id=$1 AND idempotency_key=$2 FOR UPDATE")
+                .bind(t).bind(k).fetch_optional(&mut *tx).await? {
+                if existing_fp != fp { return Err(RepositoryError::IdempotencyConflict); }
+                tx.commit().await?;
+                return Ok(InvoiceClaim { invoice: StoredInvoice {
+                    id:iid, customer_id:cid, amount, currency, status:old,
+                    payment_id:Some(existing_id), due_date:due, line_items:items,
+                }, claimed:false });
+            }
+        }
+        if old != "open" {
             tx.commit().await?;
             return Ok(InvoiceClaim {
                 invoice: StoredInvoice {
@@ -496,8 +508,7 @@ impl PgRepository {
         }
         let invoice_status = match status {
             "succeeded" => "paid",
-            "failed" => "failed",
-            _ => "pending",
+            _ => "open",
         };
         sqlx::query("UPDATE payments SET status=$1,provider_id=COALESCE($2,provider_id),updated_at=now() WHERE id=$3 AND tenant_id=$4")
             .bind(status).bind(provider).bind(payment_id).bind(t).execute(&mut *tx).await?;
@@ -509,11 +520,16 @@ impl PgRepository {
             .bind(id)
             .execute(&mut *tx)
             .await?;
-        if invoice_status != "pending" {
-            let event_id = format!("invoice_payment:{id}:{payment_id}");
-            let payload = serde_json::to_vec(&serde_json::json!({"event_id":event_id,"payment_id":payment_id,"status":status,"psp_id":provider,"invoice_id":id})).unwrap();
-            sqlx::query("INSERT INTO webhook_deliveries(id,registration_id,event_id,payload,event_type) SELECT gen_random_uuid(),id,$1,$2,'invoice_payment' FROM webhook_registrations WHERE tenant_id=$3 AND active=true ON CONFLICT DO NOTHING")
-                .bind(&event_id).bind(payload).bind(t).execute(&mut *tx).await?;
+        let event_type = match status {
+            "succeeded" => "invoice.paid",
+            "failed" => "invoice.payment_failed",
+            _ => "",
+        };
+        if !event_type.is_empty() {
+            let event_id = format!("{event_type}:{id}:{payment_id}");
+            let payload = serde_json::to_vec(&serde_json::json!({"event_id":event_id,"event_type":event_type,"payment_id":payment_id,"status":status,"psp_id":provider,"invoice_id":id})).unwrap();
+            sqlx::query("INSERT INTO webhook_deliveries(id,registration_id,event_id,payload,event_type) SELECT gen_random_uuid(),id,$1,$2,$4 FROM webhook_registrations WHERE tenant_id=$3 AND active=true ON CONFLICT DO NOTHING")
+                .bind(&event_id).bind(payload).bind(t).bind(event_type).execute(&mut *tx).await?;
         }
         tx.commit().await?;
         Ok(StoredInvoice {
