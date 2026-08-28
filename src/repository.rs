@@ -309,6 +309,28 @@ impl PgRepository {
             },
         ))
     }
+    pub async fn finalize_invoice(
+        &self,
+        t: Uuid,
+        id: Uuid,
+    ) -> Result<StoredInvoice, RepositoryError> {
+        let row = sqlx::query_as::<_, (Uuid, Uuid, i64, String, String, Option<Uuid>, Option<chrono::NaiveDate>, serde_json::Value)>(
+            "UPDATE invoices SET status='open', finalized_at=COALESCE(finalized_at, now()) WHERE tenant_id=$1 AND id=$2 AND status='draft' RETURNING id,customer_id,amount,currency,status,payment_id,due_date,line_items")
+            .bind(t).bind(id).fetch_optional(&self.pool).await?;
+        row.map(
+            |(id, customer_id, amount, currency, status, payment_id, due_date, v)| StoredInvoice {
+                id,
+                customer_id,
+                amount,
+                currency,
+                status,
+                payment_id,
+                due_date,
+                line_items: serde_json::from_value(v).unwrap_or_default(),
+            },
+        )
+        .ok_or(RepositoryError::NotFound)
+    }
     pub async fn get_invoice(
         &self,
         t: Uuid,
@@ -368,7 +390,7 @@ impl PgRepository {
                 line_items: serde_json::from_value(items).unwrap_or_default(),
             });
         }
-        if old != "draft" {
+        if old != "draft" && old != "open" {
             return Err(RepositoryError::IdempotencyConflict);
         }
         if let Some(k) = key {

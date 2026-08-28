@@ -120,6 +120,16 @@ impl PaymentStore {
     pub fn insert_invoice(&self, i: Invoice) {
         self.invoices.write().unwrap().insert(i.id, i);
     }
+    pub async fn finalize_invoice(&self, id: Uuid) -> Option<Invoice> {
+        let _g = self.reservation.lock().await;
+        let mut i = self.invoice(id)?;
+        if i.status != "draft" {
+            return None;
+        }
+        i.status = "open".into();
+        self.insert_invoice(i.clone());
+        Some(i)
+    }
 
     pub async fn pay_invoice(
         &self,
@@ -133,7 +143,7 @@ impl PaymentStore {
         if i.status == "paid" {
             return Ok(i);
         }
-        if i.status != "draft" {
+        if i.status != "draft" && i.status != "open" {
             return Err(true);
         }
         if token == "decline" {

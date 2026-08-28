@@ -2,6 +2,31 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+pub fn canonical_fingerprint<T: Serialize>(value: &T) -> String {
+    let json = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+    fn normalize(v: serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(m) => {
+                let mut entries: Vec<_> = m.into_iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                serde_json::Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k, normalize(v)))
+                        .collect(),
+                )
+            }
+            serde_json::Value::Array(a) => {
+                serde_json::Value::Array(a.into_iter().map(normalize).collect())
+            }
+            v => v,
+        }
+    }
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(&normalize(json)).unwrap_or_default(),
+    ))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InvoiceStatus {

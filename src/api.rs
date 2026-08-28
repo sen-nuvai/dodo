@@ -49,7 +49,7 @@ pub async fn create_payment(
             "idempotency-key cannot be empty".into(),
         ));
     }
-    let fp = serde_json::to_string(&i).unwrap_or_default();
+    let fp = canonical_fingerprint(&i);
     if let Some(repo) = &s.repository {
         let raw = h
             .get("x-api-key")
@@ -349,6 +349,39 @@ pub async fn create_invoice(
     s.payments.insert_invoice(inv.clone());
     Ok((StatusCode::CREATED, Json(inv)))
 }
+pub async fn finalize_invoice(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Invoice>, AppError> {
+    let map = |i: crate::repository::StoredInvoice| Invoice {
+        id: i.id,
+        customer_id: i.customer_id,
+        amount: i.amount,
+        currency: i.currency,
+        status: i.status,
+        payment_id: i.payment_id,
+        due_date: i.due_date,
+        line_items: i.line_items,
+    };
+    if let Some(repo) = &s.repository {
+        let i = repo
+            .finalize_invoice(tenant(&s, &h).await?.unwrap(), id)
+            .await
+            .map_err(|e| match e {
+                crate::repository::RepositoryError::NotFound => AppError::NotFound,
+                _ => AppError::Internal,
+            })?;
+        return Ok(Json(map(i)));
+    }
+    let i = s
+        .payments
+        .finalize_invoice(id)
+        .await
+        .ok_or(AppError::Conflict)?;
+    Ok(Json(i))
+}
+
 pub async fn pay_invoice(
     State(s): State<AppState>,
     Path(id): Path<Uuid>,
