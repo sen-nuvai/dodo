@@ -1,0 +1,25 @@
+[package]
+name = "dodo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "migrate", "derive", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+tower = "0.5"
+
+[[bin]]
+name = "dodo"
+path = "src/main.rs"

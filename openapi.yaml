@@ -1,0 +1,148 @@
+openapi: 3.0.3
+info:
+  title: dodo Payments API
+  version: 0.3.0
+  description: Tenant-scoped payment API with customers, invoices, attempts, and signed webhooks.
+servers:
+  - url: http://localhost:3000
+security:
+  - apiKeyAuth: []
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      security: []
+      responses:
+        '200':
+          description: OK
+          content: {text/plain: {schema: {type: string, example: ok}}}
+  /payments:
+    post:
+      summary: Create an idempotent payment
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema: {type: string, minLength: 1}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreatePayment'}
+      responses:
+        '201': {description: Succeeded, content: {application/json: {schema: {$ref: '#/components/schemas/Payment'}}}}
+        '402': {description: Failed or pending PSP outcome, content: {application/json: {schema: {$ref: '#/components/schemas/Payment'}}}}
+        '400': {description: Invalid request}
+        '409': {description: Idempotency fingerprint conflict}
+  /payments/{id}:
+    get:
+      parameters: [{ $ref: '#/components/parameters/PaymentId' }]
+      responses:
+        '200': {description: Payment, content: {application/json: {schema: {$ref: '#/components/schemas/Payment'}}}}
+        '404': {description: Not found}
+  /payments/{id}/attempts:
+    get:
+      parameters: [{ $ref: '#/components/parameters/PaymentId' }]
+      responses: {'200': {description: Attempts, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/PaymentAttempt'}}}}}}
+  /webhooks:
+    post:
+      summary: Register outbound webhook target
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [url], properties: {url: {type: string, format: uri}}}}}}
+      responses: {'201': {description: Registered}}
+  /customers:
+    get:
+      summary: List tenant customers
+      responses: {'200': {description: Customers, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Customer'}}}}}}
+    post:
+      summary: Create a tenant customer
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateCustomer'}}}}
+      responses: {'201': {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/Customer'}}}}, '401': {description: Unauthorized}}
+  /customers/{id}:
+    get:
+      summary: Get a tenant customer
+      responses: {'200': {description: Customer}, '404': {description: Not found}}
+    put:
+      summary: Update a tenant customer
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UpdateCustomer'}}}}
+      responses: {'200': {description: Customer, content: {application/json: {schema: {$ref: '#/components/schemas/Customer'}}}}, '404': {description: Not found}}
+  /invoices:
+    get:
+      summary: List tenant invoices
+      responses: {'200': {description: Invoices}}
+    post:
+      summary: Create a tenant invoice
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateInvoice'}}}}
+      responses: {'201': {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/Invoice'}}}}, '404': {description: Customer not found}}
+  /invoices/{id}:
+    get:
+      summary: Get a tenant invoice
+      responses: {'200': {description: Invoice}, '404': {description: Not found}}
+  /invoices/{id}/pay:
+    post:
+      summary: Pay a tenant invoice atomically
+      parameters: [{in: header, name: Idempotency-Key, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [payment_method_token], properties: {payment_method_token: {type: string}}}}}}
+      responses: {'200': {description: Invoice, content: {application/json: {schema: {$ref: '#/components/schemas/Invoice'}}}}, '404': {description: Not found}, '409': {description: Conflict}}
+  /webhooks/{registration_id}:
+    post:
+      summary: Apply an event for a specific tenant webhook registration
+      responses: {'204': {description: Applied}, '401': {description: Invalid signature}, '404': {description: Not found}}
+  /webhooks/mock:
+    post:
+      summary: Apply authenticated provider event
+      parameters: [{in: header, name: x-webhook-signature, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/WebhookEvent'}}}}
+      responses:
+        '204': {description: Applied and outbound delivery queued}
+        '401': {description: Invalid signature}
+        '409': {description: Invalid state transition}
+components:
+  securitySchemes:
+    apiKeyAuth: {type: apiKey, in: header, name: X-API-Key, description: Tenant key in prefix_secret format}
+    bearerAuth: {type: http, scheme: bearer, description: Enabled when API_TOKEN is configured}
+  parameters:
+    PaymentId: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+  schemas:
+    CreateCustomer: {type: object, required: [email, name], properties: {email: {type: string}, name: {type: string}}}
+    UpdateCustomer: {type: object, properties: {email: {type: string}, name: {type: string}}}
+    Customer: {type: object, required: [id, email, name], properties: {id: {type: string, format: uuid}, email: {type: string}, name: {type: string}}}
+    CreateInvoice: {type: object, required: [customer_id, currency, line_items], properties: {customer_id: {type: string, format: uuid}, currency: {type: string}, line_items: {type: array, items: {$ref: '#/components/schemas/LineItem'}}, due_date: {type: string, format: date, nullable: true}}}
+    Invoice: {type: object, required: [id, customer_id, amount, currency, status], properties: {id: {type: string, format: uuid}, customer_id: {type: string, format: uuid}, amount: {type: integer}, currency: {type: string}, status: {type: string, enum: [draft, paid, failed, pending]}, payment_id: {type: string, format: uuid, nullable: true}}}
+
+    LineItem:
+      type: object
+      required: [quantity, unit_amount_cents]
+      properties:
+        quantity: {type: integer, format: int64, minimum: 1}
+        unit_amount_cents: {type: integer, format: int64, minimum: 1}
+        description: {type: string, nullable: true}
+    CreatePayment:
+      type: object
+      required: [currency]
+      properties:
+        amount: {type: integer, format: int64, minimum: 1}
+        currency: {type: string, minLength: 3, maxLength: 3, example: USD}
+        line_items: {type: array, items: {$ref: '#/components/schemas/LineItem'}}
+        payment_method_token: {type: string}
+    Payment:
+      type: object
+      required: [id, amount, currency, status, attempts]
+      properties:
+        id: {type: string, format: uuid}
+        amount: {type: integer, format: int64}
+        currency: {type: string}
+        status: {type: string, enum: [pending, succeeded, failed]}
+        psp_id: {type: string, nullable: true}
+        idempotency_key: {type: string, nullable: true}
+        attempts: {type: integer}
+    PaymentAttempt:
+      type: object
+      properties: {id: {type: string, format: uuid}, payment_id: {type: string, format: uuid}, status: {type: string}, psp_id: {type: string, nullable: true}, error: {type: string, nullable: true}}
+    WebhookEvent:
+      type: object
+      required: [event_id, payment_id, status]
+      properties:
+        event_id: {type: string}
+        payment_id: {type: string, format: uuid}
+        status: {type: string, enum: [pending, succeeded, failed]}
+        psp_id: {type: string, nullable: true}
