@@ -24,7 +24,7 @@ PostgreSQL routes require `X-API-Key` in `prefix_secret` format. When `API_TOKEN
 
 Invoice states are `draft`, `open`, `paid`, `void`, and `uncollectible`. Payment and payment-attempt states are `pending`, `succeeded`, and `failed`. Failed and unknown PSP outcomes leave the invoice `open`.
 
-`Idempotency-Key` is tenant-scoped by `(tenant_id, idempotency_key)`. The fingerprint is a versioned, length-delimited SHA-256 over invoice ID, payment token, amount, and uppercase currency. A matching key/fingerprint returns the persisted payment response without another PSP call; a changed fingerprint returns `409 Conflict`. PostgreSQL invoice locking prevents concurrent local claims for one invoice. Payment response status and JSON response data are persisted for direct payment replay. Raw tokens are never persisted or logged.
+`Idempotency-Key` is tenant-scoped by `(tenant_id, idempotency_key)`. The fingerprint is a versioned, length-delimited SHA-256 over invoice ID, payment token, amount, and uppercase currency. A matching key/fingerprint returns the persisted payment response without another PSP call when complete. A matching in-flight claim returns `202 Accepted` with pending payment data; callers do not synchronously receive the eventual result. A changed fingerprint returns `409 Conflict`. PostgreSQL invoice locking prevents concurrent local claims for one invoice. Payment response status and JSON response data are persisted for direct payment replay. Raw tokens are never persisted or logged.
 
 ## Webhooks
 

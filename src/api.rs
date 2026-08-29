@@ -90,8 +90,13 @@ pub async fn create_payment(
         let response = stored
             .response_body
             .and_then(|v| serde_json::from_value::<Payment>(v).ok());
+        let response_status = if stored.status == "pending" {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::from_u16(stored.response_status as u16).unwrap_or(StatusCode::CREATED)
+        };
         return Ok((
-            StatusCode::from_u16(stored.response_status as u16).unwrap_or(StatusCode::CREATED),
+            response_status,
             Json(response.unwrap_or(Payment {
                 id: stored.id,
                 amount: stored.amount,

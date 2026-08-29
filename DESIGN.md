@@ -29,7 +29,7 @@ This guarantees one local payment claim per invoice. It does not claim exactly-o
 
 ### Idempotency reuse
 
-The fingerprint is a versioned, length-delimited SHA-256 over invoice ID, payment token, amount, and uppercase currency. Matching tenant/key/fingerprint requests replay the stored payment/invoice identity and status without a PSP call. A changed fingerprint returns `409 Conflict`. The unique `(tenant_id, idempotency_key)` constraint allows independent tenants to reuse a key. Raw tokens are not persisted or logged.
+The fingerprint is a versioned, length-delimited SHA-256 over invoice ID, payment token, amount, and uppercase currency. Matching tenant/key/fingerprint requests replay the persisted response body/status without a PSP call when complete. A matching in-flight claim returns `202 Accepted` with pending payment data; callers do not synchronously receive the eventual result. A changed fingerprint returns `409 Conflict`. The unique `(tenant_id, idempotency_key)` constraint allows independent tenants to reuse a key. Raw tokens are not persisted or logged.
 
 ### PSP timeout and network failure
 
