@@ -198,10 +198,10 @@ impl PgRepository {
                 .bind(format!("{tenant}:{k}"))
                 .execute(&mut *tx)
                 .await?;
-            if let Some((id, oldfp, status, old_amount, old_currency, provider_id, attempts, response_status)) = sqlx::query_as::<_,(Uuid,String,String,i64,String,Option<String>,i32,i32)>("SELECT id,request_fingerprint,status,amount,currency,provider_id,attempts,response_status FROM payments WHERE tenant_id=$1 AND idempotency_key=$2 FOR UPDATE").bind(tenant).bind(k).fetch_optional(&mut *tx).await? {
+            if let Some((id, oldfp, status, old_amount, old_currency, provider_id, attempts, response_status, response_body)) = sqlx::query_as::<_,(Uuid,String,String,i64,String,Option<String>,i32,i32,Option<serde_json::Value>)>("SELECT id,request_fingerprint,status,amount,currency,provider_id,attempts,response_status,response_body FROM payments WHERE tenant_id=$1 AND idempotency_key=$2 FOR UPDATE").bind(tenant).bind(k).fetch_optional(&mut *tx).await? {
                 if oldfp != fp { return Err(RepositoryError::IdempotencyConflict); }
                 tx.commit().await?;
-                return Ok((StoredPayment { id, amount: old_amount, currency: old_currency, response_status, response_body: None, status, provider_id, attempts }, false));
+                return Ok((StoredPayment { id, amount: old_amount, currency: old_currency, response_status, response_body, status, provider_id, attempts }, false));
             }
         }
         let id = Uuid::new_v4();
@@ -237,7 +237,7 @@ impl PgRepository {
         error: Option<&str>,
     ) -> Result<StoredPayment, RepositoryError> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("UPDATE payments SET status=$1,provider_id=$2,response_status=$3,response_body=jsonb_build_object('id',id,'amount',amount,'currency',currency,'status',$1,'psp_id',$2,'attempts',attempts),updated_at=now() WHERE tenant_id=$4 AND id=$5")
+        sqlx::query("UPDATE payments SET status=$1,provider_id=$2,response_status=$3,response_body=jsonb_build_object('id',id,'amount',amount,'currency',currency,'status',$1,'psp_id',$2,'idempotency_key',idempotency_key,'attempts',attempts),updated_at=now() WHERE tenant_id=$4 AND id=$5")
             .bind(status).bind(provider).bind(if status == "succeeded" { 201 } else { 402 }).bind(tenant).bind(id).execute(&mut *tx).await?;
         sqlx::query("UPDATE payment_attempts SET status=$1,provider_id=$2,error=$3 WHERE payment_id=$4 AND status='pending'")
             .bind(status).bind(provider).bind(error).bind(id).execute(&mut *tx).await?;
