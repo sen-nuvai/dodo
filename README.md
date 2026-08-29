@@ -79,8 +79,8 @@ curl -X POST "$base/invoices/{id}/pay" \
 
 ## Demo video
 
-[Watch the 2–3 minute Loom demo](https://www.loom.com/share/be42a223e3cb47a2b135c350bd05eb10)
+[Watch the Loom demo](https://www.loom.com/share/be42a223e3cb47a2b135c350bd05eb10)
 
-The video demonstrates Docker Compose startup, tenant-scoped customer and invoice creation, draft-to-open finalization, successful and declined payments, idempotent replay, and durable webhook events.
+The 12-minute video covers the architecture overview, live Docker Compose demo, invoice state-machine walkthrough, PSP timeout/idempotency failure-mode walkthrough, successful and declined payments, idempotent replay, and durable webhook events.
 
 This take-home is not PCI compliant and is not suitable for real funds without provider idempotency/reconciliation, secret management, observability, and operational controls.
