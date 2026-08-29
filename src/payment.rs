@@ -13,6 +13,16 @@ use std::{
 };
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+pub fn webhook_retry_delay(attempt: u32) -> Duration {
+    match attempt {
+        1 => Duration::ZERO,
+        2 => Duration::from_secs(5),
+        3 => Duration::from_secs(30),
+        4 => Duration::from_secs(300),
+        _ => Duration::from_secs(1800),
+    }
+}
 #[derive(Clone)]
 pub struct WebhookTarget {
     pub id: Uuid,
@@ -288,14 +298,7 @@ impl PaymentStore {
                 if result.is_ok_and(|r| r.status().is_success()) {
                     break;
                 }
-                let delay = match n {
-                    0 => Duration::ZERO,
-                    1 => Duration::from_secs(5),
-                    2 => Duration::from_secs(30),
-                    3 => Duration::from_secs(300),
-                    _ => Duration::from_secs(1800),
-                };
-                tokio::time::sleep(delay).await;
+                tokio::time::sleep(webhook_retry_delay(n + 1)).await;
             }
         }
     }

@@ -43,12 +43,17 @@ struct ChargeResponse {
     error: Option<String>,
 }
 impl MockPsp {
+    pub fn call_count(&self) -> u64 {
+        self.sequence.load(Ordering::Relaxed)
+    }
+
     pub async fn charge(
         &self,
         amount: i64,
         currency: &str,
         token: Option<&str>,
     ) -> Result<PspCharge, PspError> {
+        self.sequence.fetch_add(1, Ordering::Relaxed);
         if amount <= 0 {
             return Err(PspError::Declined);
         }
@@ -99,7 +104,7 @@ impl MockPsp {
             "tok_network_error" => return Err(PspError::Network),
             _ => return Err(PspError::Declined),
         }
-        let n = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let n = self.sequence.load(Ordering::Relaxed);
         Ok(PspCharge {
             id: format!("mock_ch_{n}"),
         })

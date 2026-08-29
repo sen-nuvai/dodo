@@ -103,6 +103,27 @@ async fn concurrent_invoice_payments_have_one_success_and_one_attempt() {
     assert_eq!(s.payments.attempts(payment_id).len(), 1);
 }
 
+#[test]
+fn webhook_retry_schedule_is_explicit() {
+    assert_eq!(dodo::payment::webhook_retry_delay(1), Duration::ZERO);
+    assert_eq!(
+        dodo::payment::webhook_retry_delay(2),
+        Duration::from_secs(5)
+    );
+    assert_eq!(
+        dodo::payment::webhook_retry_delay(3),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        dodo::payment::webhook_retry_delay(4),
+        Duration::from_secs(300)
+    );
+    assert_eq!(
+        dodo::payment::webhook_retry_delay(5),
+        Duration::from_secs(1800)
+    );
+}
+
 #[tokio::test]
 async fn invoice_retry_with_same_idempotency_key_replays_response_without_psp_duplicate() {
     let s = state();
