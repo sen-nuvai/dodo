@@ -1,5 +1,7 @@
 use axum::{extract::Json, http::StatusCode, routing::post, Router};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use uuid::Uuid;
 #[derive(Deserialize)]
 struct Charge {
     amount: i64,
@@ -18,32 +20,41 @@ async fn charge(Json(c): Json<Charge>) -> (StatusCode, Json<Reply>) {
             StatusCode::BAD_REQUEST,
             Json(Reply {
                 id: None,
-                error: Some("declined"),
+                error: Some("card_declined"),
             }),
         );
     }
     match c.token.as_str() {
-        "tok_success" | "" => (
-            StatusCode::OK,
-            Json(Reply {
-                id: Some("mock_psp_charge".into()),
-                error: None,
-            }),
-        ),
-        "tok_insufficient_funds" => (
-            StatusCode::OK,
-            Json(Reply {
-                id: None,
-                error: Some("insufficient_funds"),
-            }),
-        ),
-        "tok_card_declined" => (
-            StatusCode::OK,
-            Json(Reply {
-                id: None,
-                error: Some("declined"),
-            }),
-        ),
+        "tok_success" | "" => {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            (
+                StatusCode::OK,
+                Json(Reply {
+                    id: Some(Uuid::new_v4().to_string()),
+                    error: None,
+                }),
+            )
+        }
+        "tok_insufficient_funds" => {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            (
+                StatusCode::OK,
+                Json(Reply {
+                    id: None,
+                    error: Some("insufficient_funds"),
+                }),
+            )
+        }
+        "tok_card_declined" => {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            (
+                StatusCode::OK,
+                Json(Reply {
+                    id: None,
+                    error: Some("card_declined"),
+                }),
+            )
+        }
         "tok_timeout" => {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             (
@@ -65,7 +76,7 @@ async fn charge(Json(c): Json<Charge>) -> (StatusCode, Json<Reply>) {
             StatusCode::OK,
             Json(Reply {
                 id: None,
-                error: Some("declined"),
+                error: Some("card_declined"),
             }),
         ),
     }
