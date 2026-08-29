@@ -47,7 +47,7 @@ A paid invoice is returned without another PSP call. Terminal invoices cannot be
 
 Invoice creation inserts `invoice.created` delivery rows in the same transaction as the draft invoice. Payment finalization inserts `invoice.paid` or `invoice.payment_failed` rows in the same transaction as the payment/attempt/invoice update. The API returns after commit and does not wait for destination HTTP calls.
 
-The worker claims due rows using `FOR UPDATE SKIP LOCKED` and a lease. It sends the stored raw bytes. Outbound signing uses HMAC-SHA256 over exactly `timestamp + "." + raw_payload`, with the timestamp and signature headers documented by the API. Consumers should reject timestamps outside a five-minute replay window. Failed deliveries retry exactly five times: attempt 1 immediately, then +5 seconds, +30 seconds, +5 minutes, and +30 minutes. After attempt five, the row is exhausted with its last error retained.
+The worker claims due rows using `FOR UPDATE SKIP LOCKED` and a lease. It sends the stored raw bytes with `Content-Type: application/json`, `X-Webhook-Timestamp`, and `X-Webhook-Signature: sha256=<hex>`. The HMAC input is exactly `timestamp + "." + raw_payload`; consumers should reject timestamps outside a five-minute replay window. Failed deliveries retry exactly five times: attempt 1 immediately, then +5 seconds, +30 seconds, +5 minutes, and +30 minutes. After attempt five, the row is exhausted with its last error retained. The retry schedule helper and PostgreSQL lease/exhaustion test cover the policy.
 
 Inbound webhook signatures are checked against raw bytes before JSON parsing, scoped to the authenticated tenant and registration, and duplicate event IDs are idempotent.
 

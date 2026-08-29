@@ -30,7 +30,7 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/CreatePayment'}
       responses:
-        '201': {description: Succeeded, content: {application/json: {schema: {$ref: '#/components/schemas/Payment'}}}}
+        '201': {description: Succeeded or replayed succeeded payment, content: {application/json: {schema: {$ref: '#/components/schemas/Payment'}}}}
         '402': {description: Failed or pending PSP outcome, content: {application/json: {schema: {$ref: '#/components/schemas/Payment'}}}}
         '400': {description: Invalid request}
         '409': {description: Idempotency fingerprint conflict}
