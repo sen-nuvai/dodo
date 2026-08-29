@@ -6,8 +6,6 @@ use crate::{
     },
     psp::MockPsp,
 };
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use std::{
     collections::HashMap,
     sync::RwLock,
@@ -15,7 +13,6 @@ use std::{
 };
 use tokio::sync::Mutex;
 use uuid::Uuid;
-type HmacSha256 = Hmac<Sha256>;
 #[derive(Clone)]
 pub struct WebhookTarget {
     pub id: Uuid,
@@ -278,25 +275,27 @@ impl PaymentStore {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            let mut mac = HmacSha256::new_from_slice(t.secret.as_bytes()).unwrap();
-            mac.update(timestamp.to_string().as_bytes());
-            mac.update(b".");
-            mac.update(&body);
-            let sig = format!(
-                "t={timestamp},v1={}",
-                hex::encode(mac.finalize().into_bytes())
-            );
+            let sig = crate::models::webhook_signature(&t.secret, timestamp as i64, &body);
             for n in 0..5 {
                 let result = client
                     .post(&t.url)
+                    .header("x-webhook-timestamp", timestamp.to_string())
                     .header("x-webhook-signature", &sig)
+                    .header("content-type", "application/json")
                     .body(body.clone())
                     .send()
                     .await;
                 if result.is_ok_and(|r| r.status().is_success()) {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(50 * (1 << n))).await;
+                let delay = match n {
+                    0 => Duration::ZERO,
+                    1 => Duration::from_secs(5),
+                    2 => Duration::from_secs(30),
+                    3 => Duration::from_secs(300),
+                    _ => Duration::from_secs(1800),
+                };
+                tokio::time::sleep(delay).await;
             }
         }
     }

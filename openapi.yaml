@@ -94,7 +94,16 @@ paths:
   /webhooks/mock:
     post:
       summary: Apply authenticated provider event
-      parameters: [{in: header, name: x-webhook-signature, schema: {type: string}}]
+      parameters:
+        - in: header
+          name: X-Webhook-Timestamp
+          required: true
+          schema: {type: integer, format: int64}
+        - in: header
+          name: X-Webhook-Signature
+          required: true
+          description: sha256 HMAC over `<timestamp>.<raw_payload>`; consumers reject timestamps outside five minutes.
+          schema: {type: string, pattern: '^sha256=[0-9a-f]+$'}
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/WebhookEvent'}}}}
       responses:
         '204': {description: Applied and outbound delivery queued}

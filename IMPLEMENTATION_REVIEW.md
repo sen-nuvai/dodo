@@ -16,14 +16,14 @@
 
 ## Known Limitations
 
-- The current PostgreSQL invoice-pay handler still requires further claim-before-PSP integration work before it can honestly guarantee one PSP initiation across instances.
+- The PostgreSQL claim coordinates local PSP initiation, but a process crash after remote acceptance and before finalization remains an unknown external outcome.
 - The mock PSP has no reconciliation API, so exactly-once external charging cannot be claimed across a process crash.
 - PostgreSQL integration tests are skipped when `DATABASE_URL` is unset.
 - Docker Compose verification may require overriding `PSP_PORT` if host port 4000 is occupied.
 
 ## Tests Added / Run
 
-Existing API and repository tests remain green: 8 API tests and 4 PostgreSQL-gated tests. Formatting, Clippy with warnings denied, and `cargo test` passed locally. A live PostgreSQL and Docker Compose run must be recorded separately when available.
+Existing API and repository tests remain green: 8 API tests and 4 PostgreSQL-gated tests. Formatting, Clippy with warnings denied, and `cargo test` passed locally. PostgreSQL tests execute when `DATABASE_URL` is set and fail loudly if that configured database is unavailable. A live PostgreSQL and Docker Compose run must be recorded separately when available.
 
 ## Final Verification
 

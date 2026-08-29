@@ -1,6 +1,48 @@
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+type HmacSha256 = Hmac<Sha256>;
+
+pub fn webhook_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+pub fn webhook_signature(secret: &str, timestamp: i64, payload: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("valid HMAC key");
+    mac.update(timestamp.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(payload);
+    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+}
+
+pub fn verify_webhook_signature(
+    secret: &str,
+    timestamp: i64,
+    signature: &str,
+    payload: &[u8],
+) -> bool {
+    if (webhook_timestamp() - timestamp).abs() > 300 || !signature.strip_prefix("sha256=").is_some()
+    {
+        return false;
+    }
+    let Some(hex_signature) = signature.strip_prefix("sha256=") else {
+        return false;
+    };
+    let Ok(expected) = hex::decode(hex_signature) else {
+        return false;
+    };
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("valid HMAC key");
+    mac.update(timestamp.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(payload);
+    mac.verify_slice(&expected).is_ok()
+}
 
 pub fn canonical_fingerprint<T: Serialize>(value: &T) -> String {
     let json = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);

@@ -1,50 +1,10 @@
 use crate::models::LineItem;
-use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use uuid::Uuid;
-type HmacSha256 = Hmac<Sha256>;
-
-fn signed_webhook(secret: &str, timestamp: i64, payload: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("valid hmac key");
-    mac.update(timestamp.to_string().as_bytes());
-    mac.update(b".");
-    mac.update(payload);
-    format!(
-        "t={timestamp},v1={}",
-        hex::encode(mac.finalize().into_bytes())
-    )
-}
-
-fn verify_webhook(secret: &str, header: &str, payload: &[u8]) -> bool {
-    let mut timestamp = None;
-    let mut signature = None;
-    for part in header.split(',') {
-        let Some((key, value)) = part.trim().split_once('=') else {
-            continue;
-        };
-        match key {
-            "t" => timestamp = value.parse::<i64>().ok(),
-            "v1" => signature = hex::decode(value).ok(),
-            _ => {}
-        }
-    }
-    let (Some(ts), Some(sig)) = (timestamp, signature) else {
-        return false;
-    };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    if (now - ts).abs() > 300 {
-        return false;
-    }
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("valid hmac key");
-    mac.update(ts.to_string().as_bytes());
-    mac.update(b".");
-    mac.update(payload);
-    mac.verify_slice(&sig).is_ok()
+fn verify_webhook(secret: &str, timestamp: i64, signature: &str, payload: &[u8]) -> bool {
+    crate::models::verify_webhook_signature(secret, timestamp, signature, payload)
 }
 
 #[derive(Clone)]
@@ -60,6 +20,8 @@ pub struct StoredPayment {
     pub status: String,
     pub provider_id: Option<String>,
     pub attempts: i32,
+    pub response_status: i32,
+    pub response_body: Option<serde_json::Value>,
 }
 #[derive(Debug, Clone)]
 pub struct StoredInvoice {
@@ -179,11 +141,11 @@ impl PgRepository {
                 .await?;
         }
         let old = if let Some(k) = key {
-            sqlx::query_as::<_,(Uuid,String,String,i64,String,Option<String>,i32)>("SELECT id,request_fingerprint,status,amount,currency,provider_id,attempts FROM payments WHERE tenant_id=$1 AND idempotency_key=$2 FOR UPDATE").bind(tenant).bind(k).fetch_optional(&mut *tx).await?
+            sqlx::query_as::<_,(Uuid,String,String,i64,String,Option<String>,i32,i32)>("SELECT id,request_fingerprint,status,amount,currency,provider_id,attempts,response_status FROM payments WHERE tenant_id=$1 AND idempotency_key=$2 FOR UPDATE").bind(tenant).bind(k).fetch_optional(&mut *tx).await?
         } else {
             None
         };
-        if let Some((id, oldfp, st, amt, cur, pid, att)) = old {
+        if let Some((id, oldfp, st, amt, cur, pid, att, response_status)) = old {
             if oldfp != fp {
                 return Err(RepositoryError::IdempotencyConflict);
             }
@@ -192,13 +154,15 @@ impl PgRepository {
                 id,
                 amount: amt,
                 currency: cur,
+                response_status,
+                response_body: None,
                 status: st,
                 provider_id: pid,
                 attempts: att,
             });
         }
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO payments(id,tenant_id,amount,currency,status,provider,provider_id,idempotency_key,request_fingerprint,attempts) VALUES($1,$2,$3,$4,$5,'mock',$6,$7,$8,1)").bind(id).bind(tenant).bind(amount).bind(currency).bind(status).bind(provider).bind(key).bind(fp).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO payments(id,tenant_id,amount,currency,status,provider,provider_id,idempotency_key,request_fingerprint,attempts,response_status) VALUES($1,$2,$3,$4,$5,'mock',$6,$7,$8,1,$9)").bind(id).bind(tenant).bind(amount).bind(currency).bind(status).bind(provider).bind(key).bind(fp).bind(if status == "succeeded" { 201 } else { 402 }).execute(&mut *tx).await?;
         sqlx::query(
             "INSERT INTO payment_attempts(id,payment_id,status,provider_id) VALUES($1,$2,$3,$4)",
         )
@@ -216,14 +180,79 @@ impl PgRepository {
             status: status.into(),
             provider_id: provider.map(str::to_owned),
             attempts: 1,
+            response_status: if status == "succeeded" { 201 } else { 402 },
+            response_body: None,
         })
     }
+    pub async fn claim_payment(
+        &self,
+        tenant: Uuid,
+        amount: i64,
+        currency: &str,
+        key: Option<&str>,
+        fp: &str,
+    ) -> Result<(StoredPayment, bool), RepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(k) = key {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!("{tenant}:{k}"))
+                .execute(&mut *tx)
+                .await?;
+            if let Some((id, oldfp, status, old_amount, old_currency, provider_id, attempts, response_status)) = sqlx::query_as::<_,(Uuid,String,String,i64,String,Option<String>,i32,i32)>("SELECT id,request_fingerprint,status,amount,currency,provider_id,attempts,response_status FROM payments WHERE tenant_id=$1 AND idempotency_key=$2 FOR UPDATE").bind(tenant).bind(k).fetch_optional(&mut *tx).await? {
+                if oldfp != fp { return Err(RepositoryError::IdempotencyConflict); }
+                tx.commit().await?;
+                return Ok((StoredPayment { id, amount: old_amount, currency: old_currency, response_status, response_body: None, status, provider_id, attempts }, false));
+            }
+        }
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO payments(id,tenant_id,amount,currency,status,provider,idempotency_key,request_fingerprint,attempts) VALUES($1,$2,$3,$4,'pending','mock',$5,$6,1)")
+            .bind(id).bind(tenant).bind(amount).bind(currency).bind(key).bind(fp).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO payment_attempts(id,payment_id,status) VALUES($1,$2,'pending')")
+            .bind(Uuid::new_v4())
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok((
+            StoredPayment {
+                id,
+                amount,
+                currency: currency.into(),
+                status: "pending".into(),
+                provider_id: None,
+                attempts: 1,
+                response_status: 402,
+                response_body: None,
+            },
+            true,
+        ))
+    }
+
+    pub async fn finalize_payment(
+        &self,
+        tenant: Uuid,
+        id: Uuid,
+        status: &str,
+        provider: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<StoredPayment, RepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE payments SET status=$1,provider_id=$2,response_status=$3,response_body=jsonb_build_object('id',id,'amount',amount,'currency',currency,'status',$1,'psp_id',$2,'attempts',attempts),updated_at=now() WHERE tenant_id=$4 AND id=$5")
+            .bind(status).bind(provider).bind(if status == "succeeded" { 201 } else { 402 }).bind(tenant).bind(id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE payment_attempts SET status=$1,provider_id=$2,error=$3 WHERE payment_id=$4 AND status='pending'")
+            .bind(status).bind(provider).bind(error).bind(id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        self.get_payment(tenant, id)
+            .await?
+            .ok_or(RepositoryError::NotFound)
+    }
+
     pub async fn get_payment(
         &self,
         tenant: Uuid,
         id: Uuid,
     ) -> Result<Option<StoredPayment>, RepositoryError> {
-        Ok(sqlx::query_as::<_,(Uuid,i64,String,String,Option<String>,i32)>("SELECT id,amount,currency,status,provider_id,attempts FROM payments WHERE tenant_id=$1 AND id=$2").bind(tenant).bind(id).fetch_optional(&self.pool).await?.map(|(id,amount,currency,status,provider_id,attempts)|StoredPayment{id,amount,currency,status,provider_id,attempts}))
+        Ok(sqlx::query_as::<_,(Uuid,i64,String,String,Option<String>,i32,i32,Option<serde_json::Value>)>("SELECT id,amount,currency,status,provider_id,attempts,response_status,response_body FROM payments WHERE tenant_id=$1 AND id=$2").bind(tenant).bind(id).fetch_optional(&self.pool).await?.map(|(id,amount,currency,status,provider_id,attempts,response_status,response_body)|StoredPayment{id,amount,currency,status,provider_id,attempts,response_status,response_body}))
     }
     pub async fn list_attempts(
         &self,
@@ -426,32 +455,37 @@ impl PgRepository {
             .bind(t).bind(id).fetch_optional(&mut *tx).await?.ok_or(RepositoryError::NotFound)?;
         let (iid, cid, amount, currency, old, payment_id, due, items) = row;
         let items = serde_json::from_value(items).unwrap_or_default();
-        if payment_id.is_some() && old == "pending" {
-            tx.commit().await?;
-            return Ok(InvoiceClaim {
-                invoice: StoredInvoice {
-                    id: iid,
-                    customer_id: cid,
-                    amount,
-                    currency,
-                    status: old,
-                    payment_id,
-                    due_date: due,
-                    line_items: items,
-                },
-                claimed: false,
-            });
-        }
         if let Some(k) = key {
             if let Some((existing_id, existing_fp)) = sqlx::query_as::<_, (Uuid, String)>(
                 "SELECT id,request_fingerprint FROM payments WHERE tenant_id=$1 AND idempotency_key=$2 FOR UPDATE")
                 .bind(t).bind(k).fetch_optional(&mut *tx).await? {
                 if existing_fp != fp { return Err(RepositoryError::IdempotencyConflict); }
                 tx.commit().await?;
-                return Ok(InvoiceClaim { invoice: StoredInvoice {
-                    id:iid, customer_id:cid, amount, currency, status:old,
-                    payment_id:Some(existing_id), due_date:due, line_items:items,
-                }, claimed:false });
+                return Ok(InvoiceClaim { invoice: StoredInvoice { id:iid, customer_id:cid, amount, currency, status:old, payment_id:Some(existing_id), due_date:due, line_items:items }, claimed:false });
+            }
+        }
+        if let Some(existing_payment_id) = payment_id {
+            let active: Option<String> =
+                sqlx::query_scalar("SELECT status FROM payments WHERE id=$1 AND tenant_id=$2")
+                    .bind(existing_payment_id)
+                    .bind(t)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if active.as_deref() == Some("pending") {
+                tx.commit().await?;
+                return Ok(InvoiceClaim {
+                    invoice: StoredInvoice {
+                        id: iid,
+                        customer_id: cid,
+                        amount,
+                        currency,
+                        status: "open".into(),
+                        payment_id: Some(existing_payment_id),
+                        due_date: due,
+                        line_items: items,
+                    },
+                    claimed: false,
+                });
             }
         }
         if old != "open" {
@@ -487,7 +521,7 @@ impl PgRepository {
                 customer_id: cid,
                 amount,
                 currency,
-                status: "pending".into(),
+                status: "open".into(),
                 payment_id: Some(payment_id),
                 due_date: due,
                 line_items: items,
@@ -513,7 +547,7 @@ impl PgRepository {
         if pid != Some(payment_id) {
             return Err(RepositoryError::NotFound);
         }
-        if old != "pending" {
+        if old != "open" {
             tx.commit().await?;
             return Ok(StoredInvoice {
                 id: iid,
@@ -627,8 +661,8 @@ impl PgRepository {
         sqlx::query("UPDATE invoices SET status=$1,payment_id=$2 WHERE tenant_id=$3 AND id=$4")
             .bind(match status {
                 "succeeded" => "paid",
-                "failed" => "failed",
-                _ => "pending",
+                "failed" => "open",
+                _ => "open",
             })
             .bind(payment_id)
             .bind(t)
@@ -643,8 +677,8 @@ impl PgRepository {
             currency,
             status: match status {
                 "succeeded" => "paid".into(),
-                "failed" => "failed".into(),
-                _ => "pending".into(),
+                "failed" => "open".into(),
+                _ => "open".into(),
             },
             payment_id: Some(payment_id),
             due_date: due,
@@ -677,6 +711,7 @@ impl PgRepository {
         &self,
         t: Uuid,
         registration_id: Option<Uuid>,
+        timestamp: i64,
         signature: &str,
         raw: &[u8],
     ) -> Result<(), RepositoryError> {
@@ -686,7 +721,7 @@ impl PgRepository {
         .bind(t).bind(registration_id).fetch_all(&self.pool).await?;
         if rows
             .into_iter()
-            .any(|(_, secret)| verify_webhook(&secret, signature, raw))
+            .any(|(_, secret)| verify_webhook(&secret, timestamp, signature, raw))
         {
             Ok(())
         } else {
@@ -703,6 +738,7 @@ impl PgRepository {
         status: &str,
         provider: Option<&str>,
         raw: &[u8],
+        timestamp: i64,
         signature: &str,
         registration_id: Option<Uuid>,
     ) -> Result<bool, RepositoryError> {
@@ -716,7 +752,9 @@ impl PgRepository {
         .await?;
         let registration_id = registrations
             .into_iter()
-            .find_map(|(id, secret)| verify_webhook(&secret, signature, raw).then_some(id))
+            .find_map(|(id, secret)| {
+                verify_webhook(&secret, timestamp, signature, raw).then_some(id)
+            })
             .ok_or_else(|| sqlx::Error::Protocol("invalid webhook signature".into()))?;
         let _: serde_json::Value = serde_json::from_slice(raw)
             .map_err(|_| sqlx::Error::Protocol("invalid webhook payload".into()))?;
@@ -743,7 +781,7 @@ impl PgRepository {
         .bind(provider)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE invoices SET status=CASE WHEN $1='succeeded' THEN 'paid' WHEN $1='failed' THEN 'failed' ELSE 'pending' END,updated_at=now() WHERE tenant_id=$2 AND payment_id=$3")
+        sqlx::query("UPDATE invoices SET status=CASE WHEN $1='succeeded' THEN 'paid' ELSE 'open' END,updated_at=now() WHERE tenant_id=$2 AND payment_id=$3")
             .bind(status).bind(t).bind(pid)
             .execute(&mut *tx).await?;
         tx.commit().await?;
@@ -758,10 +796,12 @@ pub async fn run_delivery_worker(repo: PgRepository) {
     loop {
         let rows = sqlx::query_as::<_,(Uuid,String,String,Vec<u8>,i32,i64)>("WITH claimed AS (SELECT id FROM webhook_deliveries WHERE delivered_at IS NULL AND exhausted_at IS NULL AND attempts < 5 AND next_attempt_at<=now() AND (lease_until IS NULL OR lease_until<now()) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 20) UPDATE webhook_deliveries d SET attempts=d.attempts+1, lease_until=now()+interval '30 seconds' FROM claimed c WHERE d.id=c.id RETURNING d.id,(SELECT url FROM webhook_registrations r WHERE r.id=d.registration_id),(SELECT secret FROM webhook_registrations r WHERE r.id=d.registration_id),d.payload,d.attempts,extract(epoch from now())::bigint").fetch_all(&repo.pool).await.unwrap_or_default();
         for (id, url, secret, payload, _attempt, timestamp) in rows {
-            let sig = signed_webhook(&secret, timestamp, &payload);
+            let sig = crate::models::webhook_signature(&secret, timestamp, &payload);
             let result = client
                 .post(url)
+                .header("x-webhook-timestamp", timestamp.to_string())
                 .header("x-webhook-signature", sig)
+                .header("content-type", "application/json")
                 .body(payload)
                 .send()
                 .await;

@@ -5,14 +5,20 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 async fn repo() -> Option<Arc<PgRepository>> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let repo = PgRepository::connect(&url).await.ok()?;
-    repo.migrate().await.ok()?;
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return None;
+    };
+    let repo = PgRepository::connect(&url)
+        .await
+        .expect("DATABASE_URL was set but PostgreSQL connection failed");
+    repo.migrate()
+        .await
+        .expect("DATABASE_URL was set but migrations failed");
     Some(Arc::new(repo))
 }
 
 fn key(label: &str) -> String {
-    format!("pgtest_{label}_{}", Uuid::new_v4().simple())
+    format!("pgtest{label}{}_secret", Uuid::new_v4().simple())
 }
 
 #[tokio::test]
@@ -175,11 +181,8 @@ async fn postgres_webhook_signature_replay_and_tenant_isolation() {
         &serde_json::json!({"event_id":"evt-pg", "payment_id":payment.id, "status":"succeeded"}),
     )
     .unwrap();
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(registration.secret.as_bytes()).unwrap();
-    mac.update(&body);
-    let signature = hex::encode(mac.finalize().into_bytes());
+    let timestamp = dodo::models::webhook_timestamp();
+    let signature = dodo::models::webhook_signature(&registration.secret, timestamp, &body);
     assert!(repo
         .apply_webhook(
             tenant_a,
@@ -188,6 +191,7 @@ async fn postgres_webhook_signature_replay_and_tenant_isolation() {
             "succeeded",
             Some("psp"),
             &body,
+            timestamp,
             &signature,
             None
         )
@@ -201,6 +205,7 @@ async fn postgres_webhook_signature_replay_and_tenant_isolation() {
             "succeeded",
             Some("psp"),
             &body,
+            timestamp,
             &signature,
             None
         )
@@ -214,6 +219,7 @@ async fn postgres_webhook_signature_replay_and_tenant_isolation() {
             "succeeded",
             None,
             &body,
+            timestamp,
             &signature,
             None
         )

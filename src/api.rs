@@ -5,8 +5,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use std::time::Duration;
 use uuid::Uuid;
 pub async fn health() -> &'static str {
@@ -60,28 +58,41 @@ pub async fn create_payment(
             .await
             .map_err(|_| AppError::Internal)?
             .ok_or(AppError::Unauthorized)?;
-        let status = match i.payment_method_token.as_deref() {
-            Some("tok_timeout") => "pending",
-            Some("tok_card_declined")
-            | Some("tok_insufficient_funds")
-            | Some("tok_network_error") => "failed",
-            _ => "succeeded",
-        };
-        let stored = repo
-            .create_payment(tenant, amount, &c, k.as_deref(), &fp, None, status)
+        let (claimed, is_new) = repo
+            .claim_payment(tenant, amount, &c, k.as_deref(), &fp)
             .await
             .map_err(|e| match e {
                 crate::repository::RepositoryError::IdempotencyConflict => AppError::Conflict,
                 _ => AppError::Internal,
             })?;
+        let stored = if is_new {
+            let charge = tokio::time::timeout(
+                Duration::from_secs(2),
+                s.psp.charge(amount, &c, i.payment_method_token.as_deref()),
+            )
+            .await;
+            let (status, provider, error) = match charge {
+                Ok(Ok(c)) => ("succeeded", Some(c.id), None),
+                Ok(Err(PspError::Timeout)) | Err(_) => ("pending", None, Some("timeout")),
+                Ok(Err(e)) => ("failed", None, Some(e.code())),
+            };
+            repo.finalize_payment(tenant, claimed.id, status, provider.as_deref(), error)
+                .await
+                .map_err(|_| AppError::Internal)?
+        } else {
+            claimed
+        };
         let status_enum = match stored.status.as_str() {
             "succeeded" => PaymentStatus::Succeeded,
             "failed" => PaymentStatus::Failed,
             _ => PaymentStatus::Pending,
         };
+        let response = stored
+            .response_body
+            .and_then(|v| serde_json::from_value::<Payment>(v).ok());
         return Ok((
-            StatusCode::CREATED,
-            Json(Payment {
+            StatusCode::from_u16(stored.response_status as u16).unwrap_or(StatusCode::CREATED),
+            Json(response.unwrap_or(Payment {
                 id: stored.id,
                 amount: stored.amount,
                 currency: stored.currency,
@@ -89,7 +100,7 @@ pub async fn create_payment(
                 psp_id: stored.provider_id,
                 idempotency_key: k,
                 attempts: stored.attempts as u32,
-            }),
+            })),
         ));
     }
     let p = s
@@ -563,13 +574,18 @@ async fn webhook_inner(
     body: Bytes,
     registration_id: Option<Uuid>,
 ) -> Result<StatusCode, AppError> {
+    let timestamp = h
+        .get("x-webhook-timestamp")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok());
+    let sig = h
+        .get("x-webhook-signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let timestamp = timestamp.ok_or(AppError::Unauthorized)?;
     if let Some(repo) = &s.repository {
         let t = tenant(&s, &h).await?.unwrap();
-        let sig = h
-            .get("x-webhook-signature")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        repo.verify_webhook_signature(t, registration_id, sig, &body)
+        repo.verify_webhook_signature(t, registration_id, timestamp, sig, &body)
             .await
             .map_err(|_| AppError::Unauthorized)?;
     }
@@ -577,10 +593,6 @@ async fn webhook_inner(
         let e: WebhookEvent = serde_json::from_slice(&body)
             .map_err(|_| AppError::BadRequest("invalid event".into()))?;
         let t = tenant(&s, &h).await?.unwrap();
-        let sig = h
-            .get("x-webhook-signature")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
         let changed = repo
             .apply_webhook(
                 t,
@@ -589,6 +601,7 @@ async fn webhook_inner(
                 e.status.as_str(),
                 e.psp_id.as_deref(),
                 &body,
+                timestamp,
                 sig,
                 registration_id,
             )
@@ -600,21 +613,14 @@ async fn webhook_inner(
             Err(AppError::NotFound)
         };
     }
-    let e: WebhookEvent =
-        serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("invalid event".into()))?;
     let target = s.payments.webhooks.read().unwrap().values().next().cloned();
     if let Some(t) = target {
-        let sig = h
-            .get("x-webhook-signature")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let mut mac = Hmac::<Sha256>::new_from_slice(t.secret.as_bytes()).unwrap();
-        mac.update(&body);
-        let expected = hex::encode(mac.finalize().into_bytes());
-        if sig != expected {
+        if !crate::models::verify_webhook_signature(&t.secret, timestamp, sig, &body) {
             return Err(AppError::Unauthorized);
         }
     }
+    let e: WebhookEvent =
+        serde_json::from_slice(&body).map_err(|_| AppError::BadRequest("invalid event".into()))?;
     let event = e.clone();
     match s.payments.apply_event(
         e.event_id.clone(),
